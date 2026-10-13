@@ -54,7 +54,7 @@ async def lien(update: Update, context: ContextTypes.DEFAULT_TYPE):
         post = await asyncio.to_thread(pipeline.preparer, url)
     except Exception as e:
         log.exception("échec préparation")
-        await statut.edit_text(f"❌ Impossible de récupérer ce post : {e}")
+        await statut.edit_text(f"❌ Échec de la préparation : {e}")
         return
 
     try:
