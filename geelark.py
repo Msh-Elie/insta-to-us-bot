@@ -10,6 +10,7 @@ Variables d'environnement (à définir dans Render) :
   3. POST /open/v1/rpa/task/instagramPubReels -> tâche de publication sur le cloud phone
 """
 
+import hashlib
 import os
 import time
 import uuid
@@ -18,7 +19,8 @@ from pathlib import Path
 import requests
 
 BASE = "https://openapi.geelark.com/open/v1"
-TOKEN = os.getenv("GEELARK_TOKEN", "")
+TOKEN = os.getenv("GEELARK_TOKEN", "")      # token OU API Key (GeeHub)
+APP_ID = os.getenv("GEELARK_APP_ID", "")    # si renseigné : authentification par clé (API Key + AppId)
 PHONE_ID = os.getenv("GEELARK_PHONE_ID", "")
 DELAI_PUBLICATION = int(os.getenv("GEELARK_DELAY_SECONDS", "60"))  # publication ~1 min après l'envoi
 
@@ -31,12 +33,20 @@ def est_configure() -> bool:
     return bool(TOKEN and PHONE_ID)
 
 
+def entetes(trace_id: str | None = None, ts: int | None = None) -> dict:
+    trace_id = trace_id or str(uuid.uuid4())
+    if not APP_ID:  # authentification par token
+        return {"Content-Type": "application/json", "traceId": trace_id, "Authorization": f"Bearer {TOKEN}"}
+    # authentification par clé : sign = SHA256(AppId + traceId + ts + nonce + ApiKey) en hexa majuscules
+    ts = str(ts if ts is not None else int(time.time() * 1000))
+    nonce = trace_id[:6]
+    sign = hashlib.sha256(f"{APP_ID}{trace_id}{ts}{nonce}{TOKEN}".encode()).hexdigest().upper()
+    return {"Content-Type": "application/json", "appId": APP_ID, "traceId": trace_id,
+            "ts": ts, "nonce": nonce, "sign": sign}
+
+
 def _post(chemin: str, payload: dict) -> dict:
-    headers = {
-        "Content-Type": "application/json",
-        "traceId": str(uuid.uuid4()),
-        "Authorization": f"Bearer {TOKEN}",
-    }
+    headers = entetes()
     r = requests.post(f"{BASE}{chemin}", json=payload, headers=headers, timeout=60)
     r.raise_for_status()
     body = r.json()
