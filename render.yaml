@@ -1,0 +1,17 @@
+services:
+  - type: worker
+    name: insta-to-us-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.6
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: ALLOWED_USER_ID
+        sync: false
+      - key: GEELARK_TOKEN
+        sync: false
+      - key: GEELARK_PHONE_ID
+        value: "638208727043801351"

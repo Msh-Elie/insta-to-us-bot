@@ -1,0 +1,4 @@
+python-telegram-bot==21.11.1
+yt-dlp
+deep-translator==1.11.4
+requests
