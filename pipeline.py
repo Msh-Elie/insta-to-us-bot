@@ -66,6 +66,20 @@ def _deepl(texte: str) -> str:
     return r.json()["translations"][0]["text"]
 
 
+def _google_gtx(texte: str) -> str:
+    """Autre point d'accès Google, souvent moins limité que celui de deep_translator."""
+    r = requests.post(
+        "https://translate.googleapis.com/translate_a/single",
+        params={"client": "gtx", "sl": "auto", "tl": "en", "dt": "t"},
+        data={"q": texte},
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=30,
+    )
+    r.raise_for_status()
+    data = r.json()
+    return "".join(seg[0] for seg in data[0] if seg and seg[0])
+
+
 def _google(texte: str) -> str:
     derniere = None
     for essai in range(3):
@@ -98,7 +112,8 @@ def _decouper(texte: str, taille: int = 450) -> list[str]:
     return morceaux
 
 
-def _mymemory(texte: str) -> str:
+def _mymemory(texte: str, source: str) -> str:
+    source = source if source and source != "en" else "fr"  # par défaut : français
     sorties = []
     for morceau in _decouper(texte):
         if not morceau.strip():
@@ -106,7 +121,7 @@ def _mymemory(texte: str) -> str:
             continue
         r = requests.get(
             "https://api.mymemory.translated.net/get",
-            params={"q": morceau, "langpair": "Autodetect|en"},
+            params={"q": morceau, "langpair": f"{source}|en"},
             timeout=30,
         )
         r.raise_for_status()
@@ -117,8 +132,38 @@ def _mymemory(texte: str) -> str:
     return "\n".join(sorties)
 
 
+MOTS_COURANTS = {
+    "en": "the and you for with this that are was have your from just not what all our new get love one out more",
+    "fr": "le la les des une est et pour avec dans sur pas que qui vous nous mon ma mes ce cette tout bien très merci",
+    "es": "el los las una es y para con por que del muy pero como más gracias esta este todo mi tu",
+    "pt": "o os uma é e para com não que do da muito mas como mais obrigado esta este tudo meu você",
+    "it": "il gli una è e per con non che del della molto ma come più grazie questa questo tutto mio",
+    "de": "der die das und ist für mit nicht ein eine auf ich du wir sehr aber wie mehr danke",
+}
+
+
+def detecter_langue(texte: str) -> str:
+    """Devine la langue (en, fr, es, pt, it, de) avec les mots les plus courants ; '' si incertain."""
+    propre = re.sub(r"ZXQ\d+QXZ|https?://\S+", " ", texte.lower())
+    mots = re.findall(r"[a-zà-ÿ]+", propre)
+    if not mots:
+        return ""
+    scores = {lang: sum(m in set(liste.split()) for m in mots) for lang, liste in MOTS_COURANTS.items()}
+    meilleur = max(scores, key=scores.get)
+    return meilleur if scores[meilleur] > 0 else ""
+
+
 def _traduire_texte(texte: str) -> str:
-    services = ([("DeepL", _deepl)] if DEEPL_KEY else []) + [("Google", _google), ("MyMemory", _mymemory)]
+    source = detecter_langue(texte)
+    if not re.search(r"[^\W\d_]", re.sub(r"ZXQ\d+QXZ", "", texte)):
+        return texte  # que des emojis / hashtags : rien à traduire
+    if source == "en":
+        return texte  # déjà en anglais : rien à faire
+    services = ([("DeepL", _deepl)] if DEEPL_KEY else []) + [
+        ("Google", _google_gtx),
+        ("Google bis", _google),
+        ("MyMemory", lambda t: _mymemory(t, source)),
+    ]
     erreurs = []
     for nom, fn in services:
         try:
