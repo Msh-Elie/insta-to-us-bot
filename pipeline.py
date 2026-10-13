@@ -2,6 +2,7 @@
 
 import os
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import yt_dlp
 from deep_translator import GoogleTranslator
 
 WORKDIR = Path(os.getenv("WORKDIR", "/tmp/insta-bot"))
-COOKIES = os.getenv("IG_COOKIES_FILE", "")  # chemin d'un cookies.txt (Secret File Render), optionnel
+COOKIES = os.getenv("IG_COOKIES_FILE", "/etc/secrets/cookies.txt")  # chemin d'un cookies.txt (Secret File Render), optionnel
 
 
 @dataclass
@@ -37,7 +38,10 @@ def telecharger(url: str, code: str) -> tuple[Path, str]:
         "noplaylist": True,
     }
     if COOKIES and Path(COOKIES).exists():
-        opts["cookiefile"] = COOKIES
+        # Render monte les Secret Files en lecture seule : yt-dlp a besoin d'une copie modifiable
+        copie = WORKDIR / "cookies.txt"
+        shutil.copyfile(COOKIES, copie)
+        opts["cookiefile"] = str(copie)
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
         chemin = Path(ydl.prepare_filename(info))
