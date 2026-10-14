@@ -7,7 +7,8 @@ Variables d'environnement (à définir dans Render) :
 Étapes :
   1. POST /open/v1/upload/getUrl        -> uploadUrl (valable 30 min) + resourceUrl
   2. PUT  <uploadUrl> avec le fichier   -> la vidéo est hébergée chez GeeLark (3 jours)
-  3. POST /open/v1/rpa/task/instagramPubReels -> tâche de publication sur le cloud phone
+  3. POST /open/v1/rpa/task/instagramPubReels       -> réel vidéo
+     POST /open/v1/rpa/task/instagramPubReelsImages -> carrousel de photos (publishPost=true)
 """
 
 import hashlib
@@ -55,25 +56,42 @@ def _post(chemin: str, payload: dict) -> dict:
     return body.get("data") or {}
 
 
-def envoyer_video(video: Path) -> str:
-    """Héberge la vidéo chez GeeLark et renvoie son resourceUrl."""
-    ext = video.suffix.lstrip(".").lower() or "mp4"
+def envoyer_fichier(fichier: Path) -> str:
+    """Héberge un fichier (photo ou vidéo) chez GeeLark et renvoie son resourceUrl."""
+    ext = fichier.suffix.lstrip(".").lower() or "mp4"
     data = _post("/upload/getUrl", {"fileType": ext})
-    with video.open("rb") as f:
+    with fichier.open("rb") as f:
         r = requests.put(data["uploadUrl"], data=f, timeout=600)
     if r.status_code != 200:
-        raise GeeLarkError(f"Échec de l'envoi de la vidéo (HTTP {r.status_code})")
+        raise GeeLarkError(f"Échec de l'envoi de {fichier.name} (HTTP {r.status_code})")
     return data["resourceUrl"]
 
 
+envoyer_video = envoyer_fichier
+
+
 def publier(video: Path, caption: str) -> str:
-    """Envoie la vidéo puis crée la tâche « Instagram publish Reels video ». Renvoie l'ID de tâche."""
-    url_video = envoyer_video(video)
+    """Réel vidéo : tâche « Instagram publish Reels video ». Renvoie l'ID de tâche."""
+    url_video = envoyer_fichier(video)
     data = _post("/rpa/task/instagramPubReels", {
-        "name": f"Repost {video.stem}"[:128],
+        "name": f"Repost {video.parent.name}"[:128],
         "scheduleAt": int(time.time()) + DELAI_PUBLICATION,  # timestamp en secondes
         "id": PHONE_ID,
         "description": caption[:2200],
         "video": [url_video],
+    })
+    return str(data.get("taskId", "?"))
+
+
+def publier_carrousel(images: list, caption: str) -> str:
+    """Carrousel de photos publié comme post classique (publishPost=true), jusqu'à 10 photos."""
+    urls = [envoyer_fichier(img) for img in images[:10]]
+    data = _post("/rpa/task/instagramPubReelsImages", {
+        "name": f"Repost carrousel {images[0].parent.name}"[:128],
+        "scheduleAt": int(time.time()) + DELAI_PUBLICATION,
+        "id": PHONE_ID,
+        "description": caption[:2200],
+        "image": urls,
+        "publishPost": True,
     })
     return str(data.get("taskId", "?"))

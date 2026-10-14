@@ -11,7 +11,7 @@ import os
 import re
 import shutil
 
-from telegram import Update
+from telegram import InputMediaPhoto, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 import geelark
@@ -37,7 +37,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if not autorise(update):
         return
-    await update.message.reply_text("Prêt. Envoie-moi un lien Instagram (reel ou post vidéo).")
+    await update.message.reply_text("Prêt. Envoie-moi un lien Instagram : réel, post vidéo ou carrousel de photos.")
 
 
 async def lien(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -58,24 +58,44 @@ async def lien(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
+        nb = len(post.medias)
+        quoi = "réel" if post.type == "reel" else f"carrousel ({nb} photo{'s' if nb > 1 else ''})"
+        avert = "\n⚠️ Plus de 10 médias : seuls les 10 premiers sont publiés." if post.tronque else ""
         if geelark.est_configure():
-            await statut.edit_text("📤 Envoi à GeeLark…")
-            tache = await asyncio.to_thread(geelark.publier, post.video, post.caption_en)
-            await statut.edit_text(f"✅ Tâche de publication lancée sur le compte US (tâche {tache}).\n\nCaption :\n{post.caption_en}")
-        else:
-            # Mode manuel : on te renvoie tout, prêt à coller dans le modèle GeeLark
-            await statut.edit_text("✅ Matériaux prêts (publication GeeLark pas encore branchée).")
-            if post.video.stat().st_size <= LIMITE_TELEGRAM:
-                with post.video.open("rb") as f:
-                    await update.message.reply_video(f, filename=post.video.name, supports_streaming=True)
+            await statut.edit_text(f"📤 Envoi à GeeLark ({quoi})…")
+            if post.type == "reel":
+                tache = await asyncio.to_thread(geelark.publier, post.video, post.caption_en)
             else:
-                await update.message.reply_text("Vidéo trop lourde pour Telegram (> 50 Mo).")
+                tache = await asyncio.to_thread(geelark.publier_carrousel, post.medias, post.caption_en)
+            await statut.edit_text(
+                f"✅ Publication lancée sur le compte US : {quoi} (tâche {tache}).{avert}\n\nCaption :\n{post.caption_en}"
+            )
+        else:
+            # Mode manuel : on te renvoie tout, prêt à coller dans GeeLark
+            await statut.edit_text(f"✅ Matériaux prêts : {quoi} (publication GeeLark pas encore branchée).{avert}")
+            await envoyer_medias(update, post)
             await update.message.reply_text(post.caption_en or "(pas de caption)")
     except Exception as e:
         log.exception("échec publication")
         await update.message.reply_text(f"❌ Erreur à la publication : {e}")
     finally:
-        shutil.rmtree(post.video.parent, ignore_errors=True)
+        shutil.rmtree(post.dossier, ignore_errors=True)
+
+
+async def envoyer_medias(update: Update, post) -> None:
+    if post.type == "reel":
+        if post.video.stat().st_size <= LIMITE_TELEGRAM:
+            with post.video.open("rb") as f:
+                await update.message.reply_video(f, filename=post.video.name, supports_streaming=True)
+        else:
+            await update.message.reply_text("Vidéo trop lourde pour Telegram (> 50 Mo).")
+        return
+    fichiers = [m.open("rb") for m in post.medias]
+    try:
+        await update.message.reply_media_group([InputMediaPhoto(f, filename=m.name) for f, m in zip(fichiers, post.medias)])
+    finally:
+        for f in fichiers:
+            f.close()
 
 
 def main():

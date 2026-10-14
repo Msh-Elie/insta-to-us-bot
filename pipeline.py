@@ -1,8 +1,15 @@
-"""Téléchargement + traduction : lien Insta -> (vidéo au nom court, caption EN)."""
+"""Téléchargement + traduction : lien Insta -> (médias aux noms courts, caption EN).
 
+Reel / vidéo -> yt-dlp. Post /p/ (carrousel de photos) -> gallery-dl.
+"""
+
+import logging
 import os
 import re
+import json
 import shutil
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,16 +18,30 @@ import requests
 import yt_dlp
 from deep_translator import GoogleTranslator
 
+log = logging.getLogger("insta-bot")
+
 WORKDIR = Path(os.getenv("WORKDIR", "/tmp/insta-bot"))
 COOKIES = os.getenv("IG_COOKIES_FILE", "/etc/secrets/cookies.txt")  # chemin d'un cookies.txt (Secret File Render), optionnel
+
+
+EXT_IMAGES = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
+EXT_VIDEOS = {".mp4", ".webm", ".mov"}
+MAX_CARROUSEL = 10  # limite GeeLark
 
 
 @dataclass
 class Post:
     code: str
-    video: Path
+    dossier: Path
+    medias: list  # list[Path], dans l'ordre du post
+    type: str     # "reel" (une vidéo) ou "carrousel" (photos)
     caption_original: str
     caption_en: str
+    tronque: bool = False
+
+    @property
+    def video(self) -> Path:
+        return self.medias[0]
 
 
 def extraire_code(url: str) -> str:
@@ -28,6 +49,52 @@ def extraire_code(url: str) -> str:
     if not m:
         raise ValueError("Lien Instagram non reconnu.")
     return m.group(1)
+
+
+def _cookies() -> str:
+    """Copie modifiable du cookies.txt (Render monte les Secret Files en lecture seule)."""
+    if COOKIES and Path(COOKIES).exists():
+        WORKDIR.mkdir(parents=True, exist_ok=True)
+        copie = WORKDIR / "cookies.txt"
+        shutil.copyfile(COOKIES, copie)
+        return str(copie)
+    return ""
+
+
+def telecharger_galerie(url: str, code: str) -> tuple[list, str]:
+    """Télécharge toutes les photos/vidéos d'un post (carrousel) avec gallery-dl, renommées 01.jpg, 02.jpg…"""
+    dossier = WORKDIR / code
+    shutil.rmtree(dossier, ignore_errors=True)
+    dossier.mkdir(parents=True, exist_ok=True)
+    cmd = [sys.executable, "-m", "gallery_dl", "-D", str(dossier),
+           "-f", "{num}_{media_id}.{extension}", "--write-metadata", "--no-mtime"]
+    cookies = _cookies()
+    if cookies:
+        cmd += ["--cookies", cookies]
+    res = subprocess.run(cmd + [url], capture_output=True, text=True, timeout=600)
+    fichiers = sorted(
+        (f for f in dossier.iterdir() if f.suffix.lower() in EXT_IMAGES | EXT_VIDEOS),
+        key=lambda f: (int(f.stem.split("_")[0]) if f.stem.split("_")[0].isdigit() else 0, f.name),
+    )
+    if not fichiers:
+        erreur = (res.stderr or res.stdout or "aucun média trouvé").strip().splitlines()[-1:]
+        raise RuntimeError(f"Téléchargement du post impossible : {' '.join(erreur)[:200]}")
+    caption = ""
+    for meta in sorted(dossier.glob("*.json")):
+        try:
+            caption = json.loads(meta.read_text(encoding="utf-8")).get("description") or ""
+        except Exception:
+            continue
+        if caption:
+            break
+    medias = []
+    for i, f in enumerate(fichiers, 1):  # noms courts : 01.jpg, 02.mp4…
+        court = dossier / f"{i:02d}{f.suffix.lower()}"
+        f.rename(court)
+        medias.append(court)
+    for meta in dossier.glob("*.json"):
+        meta.unlink(missing_ok=True)
+    return medias, caption
 
 
 def telecharger(url: str, code: str) -> tuple[Path, str]:
@@ -39,11 +106,9 @@ def telecharger(url: str, code: str) -> tuple[Path, str]:
         "quiet": True,
         "noplaylist": True,
     }
-    if COOKIES and Path(COOKIES).exists():
-        # Render monte les Secret Files en lecture seule : yt-dlp a besoin d'une copie modifiable
-        copie = WORKDIR / "cookies.txt"
-        shutil.copyfile(COOKIES, copie)
-        opts["cookiefile"] = str(copie)
+    cookies = _cookies()
+    if cookies:
+        opts["cookiefile"] = cookies
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
         chemin = Path(ydl.prepare_filename(info))
@@ -143,22 +208,29 @@ MOTS_COURANTS = {
 
 
 def detecter_langue(texte: str) -> str:
-    """Devine la langue (en, fr, es, pt, it, de) avec les mots les plus courants ; '' si incertain."""
-    propre = re.sub(r"ZXQ\d+QXZ|https?://\S+", " ", texte.lower())
+    """Devine la langue (en, fr, es, pt, it, de) avec les mots courants ; '' si incertain ou ex aequo."""
+    propre = re.sub(r"zxq\d+qxz|https?://\S+", " ", texte.lower())
     mots = re.findall(r"[a-zà-ÿ]+", propre)
     if not mots:
         return ""
     scores = {lang: sum(m in set(liste.split()) for m in mots) for lang, liste in MOTS_COURANTS.items()}
-    meilleur = max(scores, key=scores.get)
-    return meilleur if scores[meilleur] > 0 else ""
+    classes = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    (meilleur, s1), (_, s2) = classes[0], classes[1]
+    if s1 == 0 or s1 == s2:
+        return ""
+    return meilleur
+
+
+def _normaliser(t: str) -> str:
+    return re.sub(r"\W+", "", t.lower())
 
 
 def _traduire_texte(texte: str) -> str:
-    source = detecter_langue(texte)
     if not re.search(r"[^\W\d_]", re.sub(r"ZXQ\d+QXZ", "", texte)):
         return texte  # que des emojis / hashtags : rien à traduire
+    source = detecter_langue(texte)
     if source == "en":
-        return texte  # déjà en anglais : rien à faire
+        return texte  # clairement déjà en anglais
     services = ([("DeepL", _deepl)] if DEEPL_KEY else []) + [
         ("Google", _google_gtx),
         ("Google bis", _google),
@@ -167,9 +239,15 @@ def _traduire_texte(texte: str) -> str:
     erreurs = []
     for nom, fn in services:
         try:
-            return fn(texte)
+            resultat = fn(texte)
         except Exception as e:
             erreurs.append(f"{nom}: {str(e)[:80]}")
+            continue
+        if _normaliser(resultat) == _normaliser(texte):
+            erreurs.append(f"{nom}: texte renvoyé non traduit")
+            continue
+        log.info("Caption traduite via %s", nom)
+        return resultat
     raise RuntimeError("Traduction indisponible pour le moment (" + " | ".join(erreurs) + "). Réessaie dans quelques minutes.")
 
 
@@ -193,5 +271,23 @@ def traduire(caption: str) -> str:
 
 def preparer(url: str) -> Post:
     code = extraire_code(url)
-    video, caption = telecharger(url, code)
-    return Post(code=code, video=video, caption_original=caption, caption_en=traduire(caption))
+    if re.search(r"instagram\.com/(?:[\w.]+/)?p/", url):
+        medias, caption = telecharger_galerie(url, code)
+    else:
+        video, caption = telecharger(url, code)
+        medias = [video]
+
+    videos = [m for m in medias if m.suffix in EXT_VIDEOS]
+    if len(medias) == 1 and videos:
+        type_post = "reel"
+    elif not videos:
+        type_post = "carrousel"
+    else:
+        raise RuntimeError(
+            f"Ce carrousel mélange photos et vidéos ({len(medias) - len(videos)} photo(s), {len(videos)} vidéo(s)). "
+            "GeeLark ne sait publier que des carrousels de photos ou un réel vidéo."
+        )
+    tronque = len(medias) > MAX_CARROUSEL
+    medias = medias[:MAX_CARROUSEL]
+    return Post(code=code, dossier=WORKDIR / code, medias=medias, type=type_post,
+                caption_original=caption, caption_en=traduire(caption), tronque=tronque)
