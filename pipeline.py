@@ -87,6 +87,7 @@ def telecharger_galerie(url: str, code: str) -> tuple[list, str]:
             continue
         if caption:
             break
+    log.info("Post %s : %d média(s) téléchargé(s)", code, len(fichiers))
     medias = []
     for i, f in enumerate(fichiers, 1):  # noms courts : 01.jpg, 02.mp4…
         court = dossier / f"{i:02d}{f.suffix.lower()}"
@@ -270,6 +271,8 @@ def traduire(caption: str) -> str:
 
 
 def preparer(url: str) -> Post:
+    # On retire « ?img_index=1 », « ?igsh=… » etc. : img_index ferait télécharger une seule photo du carrousel
+    url = url.split("#")[0].split("?")[0]
     code = extraire_code(url)
     if re.search(r"instagram\.com/(?:[\w.]+/)?p/", url):
         medias, caption = telecharger_galerie(url, code)

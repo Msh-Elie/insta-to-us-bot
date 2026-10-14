@@ -68,7 +68,7 @@ async def lien(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 tache = await asyncio.to_thread(geelark.publier_carrousel, post.medias, post.caption_en)
             await statut.edit_text(
-                f"✅ Publication lancée sur le compte US : {quoi} (tâche {tache}).{avert}\n\nCaption :\n{post.caption_en}"
+                f"✅ Publication programmée sur le compte US dans {geelark.DELAI_PUBLICATION // 60} min : {quoi} (tâche {tache}).{avert}\n\nCaption :\n{post.caption_en}"
             )
         else:
             # Mode manuel : on te renvoie tout, prêt à coller dans GeeLark

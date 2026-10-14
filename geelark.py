@@ -23,7 +23,7 @@ BASE = "https://openapi.geelark.com/open/v1"
 TOKEN = os.getenv("GEELARK_TOKEN", "")      # token OU API Key (GeeHub)
 APP_ID = os.getenv("GEELARK_APP_ID", "")    # si renseigné : authentification par clé (API Key + AppId)
 PHONE_ID = os.getenv("GEELARK_PHONE_ID", "")
-DELAI_PUBLICATION = int(os.getenv("GEELARK_DELAY_SECONDS", "60"))  # publication ~1 min après l'envoi
+DELAI_PUBLICATION = int(os.getenv("GEELARK_DELAY_SECONDS", "300"))  # publication 5 min après la création de la tâche
 
 
 class GeeLarkError(RuntimeError):
