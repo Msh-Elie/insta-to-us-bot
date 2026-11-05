@@ -2,7 +2,7 @@
 
 Variables d'environnement (à définir dans Render) :
     GEELARK_TOKEN     token API (client GeeLark > menu GeeHub)
-    GEELARK_PHONE_ID  ID du cloud phone où est connecté le compte Instagram US
+    (les cloud phones de chaque modèle sont dans modeles.json)
 
 Étapes :
   1. POST /open/v1/upload/getUrl        -> uploadUrl (valable 30 min) + resourceUrl
@@ -23,7 +23,8 @@ BASE = "https://openapi.geelark.com/open/v1"
 TOKEN = os.getenv("GEELARK_TOKEN", "")      # token OU API Key (GeeHub)
 APP_ID = os.getenv("GEELARK_APP_ID", "")    # si renseigné : authentification par clé (API Key + AppId)
 PHONE_ID = os.getenv("GEELARK_PHONE_ID", "")
-DELAI_PUBLICATION = int(os.getenv("GEELARK_DELAY_SECONDS", "300"))  # publication 5 min après la création de la tâche
+DELAI_PUBLICATION = int(os.getenv("GEELARK_DELAY_SECONDS", "300"))  # 1re publication 5 min après la création de la tâche
+ECART_COMPTES = int(os.getenv("GEELARK_STAGGER_SECONDS", "600"))     # puis 10 min d'écart entre chaque compte
 
 
 class GeeLarkError(RuntimeError):
@@ -31,7 +32,7 @@ class GeeLarkError(RuntimeError):
 
 
 def est_configure() -> bool:
-    return bool(TOKEN and PHONE_ID)
+    return bool(TOKEN)
 
 
 def entetes(trace_id: str | None = None, ts: int | None = None) -> dict:
@@ -70,28 +71,16 @@ def envoyer_fichier(fichier: Path) -> str:
 envoyer_video = envoyer_fichier
 
 
-def publier(video: Path, caption: str) -> str:
-    """Réel vidéo : tâche « Instagram publish Reels video ». Renvoie l'ID de tâche."""
-    url_video = envoyer_fichier(video)
-    data = _post("/rpa/task/instagramPubReels", {
-        "name": f"Repost {video.parent.name}"[:128],
-        "scheduleAt": int(time.time()) + DELAI_PUBLICATION,  # timestamp en secondes
-        "id": PHONE_ID,
-        "description": caption[:2200],
-        "video": [url_video],
-    })
-    return str(data.get("taskId", "?"))
+def envoyer_medias(medias: list) -> list:
+    """Héberge tous les médias une seule fois ; les URLs servent ensuite pour tous les comptes (valables 3 jours)."""
+    return [envoyer_fichier(m) for m in medias]
 
 
-def publier_carrousel(images: list, caption: str) -> str:
-    """Carrousel de photos publié comme post classique (publishPost=true), jusqu'à 10 photos."""
-    urls = [envoyer_fichier(img) for img in images[:10]]
-    data = _post("/rpa/task/instagramPubReelsImages", {
-        "name": f"Repost carrousel {images[0].parent.name}"[:128],
-        "scheduleAt": int(time.time()) + DELAI_PUBLICATION,
-        "id": PHONE_ID,
-        "description": caption[:2200],
-        "image": urls,
-        "publishPost": True,
-    })
+def creer_tache(type_post: str, urls: list, caption: str, phone_id: str, quand: int, nom: str) -> str:
+    """Crée la tâche de publication sur un cloud phone. type_post : "reel" ou "carrousel". Renvoie l'ID de tâche."""
+    base = {"name": nom[:128], "scheduleAt": int(quand), "id": phone_id, "description": caption[:2200]}
+    if type_post == "reel":
+        data = _post("/rpa/task/instagramPubReels", {**base, "video": urls[:1]})
+    else:
+        data = _post("/rpa/task/instagramPubReelsImages", {**base, "image": urls[:10], "publishPost": True})
     return str(data.get("taskId", "?"))

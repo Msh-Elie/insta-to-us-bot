@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import requests
@@ -36,8 +36,14 @@ class Post:
     medias: list  # list[Path], dans l'ordre du post
     type: str     # "reel" (une vidéo) ou "carrousel" (photos)
     caption_original: str
-    caption_en: str
     tronque: bool = False
+    legendes: dict = field(default_factory=dict)  # {"en": "...", "fr": "..."}
+
+    def legende(self, langue: str) -> str:
+        """Légende dans la langue voulue (traduite une seule fois, puis gardée en cache)."""
+        if langue not in self.legendes:
+            self.legendes[langue] = traduire(self.caption_original, langue)
+        return self.legendes[langue]
 
     @property
     def video(self) -> Path:
@@ -120,23 +126,23 @@ def telecharger(url: str, code: str) -> tuple[Path, str]:
 DEEPL_KEY = os.getenv("DEEPL_API_KEY", "")  # optionnel : clé DeepL gratuite, plus fiable
 
 
-def _deepl(texte: str) -> str:
+def _deepl(texte: str, cible: str) -> str:
     hote = "api-free.deepl.com" if DEEPL_KEY.endswith(":fx") else "api.deepl.com"
     r = requests.post(
         f"https://{hote}/v2/translate",
         headers={"Authorization": f"DeepL-Auth-Key {DEEPL_KEY}"},
-        data={"text": texte, "target_lang": "EN-US"},
+        data={"text": texte, "target_lang": "EN-US" if cible == "en" else cible.upper()},
         timeout=30,
     )
     r.raise_for_status()
     return r.json()["translations"][0]["text"]
 
 
-def _google_gtx(texte: str) -> str:
+def _google_gtx(texte: str, cible: str) -> str:
     """Autre point d'accès Google, souvent moins limité que celui de deep_translator."""
     r = requests.post(
         "https://translate.googleapis.com/translate_a/single",
-        params={"client": "gtx", "sl": "auto", "tl": "en", "dt": "t"},
+        params={"client": "gtx", "sl": "auto", "tl": cible, "dt": "t"},
         data={"q": texte},
         headers={"User-Agent": "Mozilla/5.0"},
         timeout=30,
@@ -146,11 +152,11 @@ def _google_gtx(texte: str) -> str:
     return "".join(seg[0] for seg in data[0] if seg and seg[0])
 
 
-def _google(texte: str) -> str:
+def _google(texte: str, cible: str) -> str:
     derniere = None
     for essai in range(3):
         try:
-            return GoogleTranslator(source="auto", target="en").translate(texte) or texte
+            return GoogleTranslator(source="auto", target=cible).translate(texte) or texte
         except Exception as e:  # trop de requêtes, coupure réseau…
             derniere = e
             time.sleep(3 * (essai + 1))
@@ -178,8 +184,9 @@ def _decouper(texte: str, taille: int = 450) -> list[str]:
     return morceaux
 
 
-def _mymemory(texte: str, source: str) -> str:
-    source = source if source and source != "en" else "fr"  # par défaut : français
+def _mymemory(texte: str, source: str, cible: str) -> str:
+    if not source or source == cible:  # langue inconnue : on suppose l'autre langue du couple fr/en
+        source = "fr" if cible == "en" else "en"
     sorties = []
     for morceau in _decouper(texte):
         if not morceau.strip():
@@ -187,7 +194,7 @@ def _mymemory(texte: str, source: str) -> str:
             continue
         r = requests.get(
             "https://api.mymemory.translated.net/get",
-            params={"q": morceau, "langpair": f"{source}|en"},
+            params={"q": morceau, "langpair": f"{source}|{cible}"},
             timeout=30,
         )
         r.raise_for_status()
@@ -226,16 +233,16 @@ def _normaliser(t: str) -> str:
     return re.sub(r"\W+", "", t.lower())
 
 
-def _traduire_texte(texte: str) -> str:
+def _traduire_texte(texte: str, cible: str) -> str:
     if not re.search(r"[^\W\d_]", re.sub(r"ZXQ\d+QXZ", "", texte)):
         return texte  # que des emojis / hashtags : rien à traduire
     source = detecter_langue(texte)
-    if source == "en":
-        return texte  # clairement déjà en anglais
-    services = ([("DeepL", _deepl)] if DEEPL_KEY else []) + [
-        ("Google", _google_gtx),
-        ("Google bis", _google),
-        ("MyMemory", lambda t: _mymemory(t, source)),
+    if source == cible:
+        return texte  # déjà dans la bonne langue
+    services = ([("DeepL", lambda t: _deepl(t, cible))] if DEEPL_KEY else []) + [
+        ("Google", lambda t: _google_gtx(t, cible)),
+        ("Google bis", lambda t: _google(t, cible)),
+        ("MyMemory", lambda t: _mymemory(t, source, cible)),
     ]
     erreurs = []
     for nom, fn in services:
@@ -247,13 +254,13 @@ def _traduire_texte(texte: str) -> str:
         if _normaliser(resultat) == _normaliser(texte):
             erreurs.append(f"{nom}: texte renvoyé non traduit")
             continue
-        log.info("Caption traduite via %s", nom)
+        log.info("Caption traduite en %s via %s", cible, nom)
         return resultat
     raise RuntimeError("Traduction indisponible pour le moment (" + " | ".join(erreurs) + "). Réessaie dans quelques minutes.")
 
 
-def traduire(caption: str) -> str:
-    """Traduit en anglais en laissant hashtags et @mentions intacts."""
+def traduire(caption: str, cible: str = "en") -> str:
+    """Traduit la légende (cible : "en" ou "fr") en laissant hashtags et @mentions intacts."""
     if not caption.strip():
         return ""
     proteges: dict[str, str] = {}
@@ -264,23 +271,14 @@ def traduire(caption: str) -> str:
         return cle
 
     texte = re.sub(r"[#@][\w.]+", proteger, caption)
-    traduit = _traduire_texte(texte)
+    traduit = _traduire_texte(texte, cible)
     for cle, val in proteges.items():
         traduit = traduit.replace(cle, val)
     return traduit
 
 
-def preparer(url: str) -> Post:
-    # On retire « ?img_index=1 », « ?igsh=… » etc. : img_index ferait télécharger une seule photo du carrousel
-    url = url.split("#")[0].split("?")[0]
-    code = extraire_code(url)
-    if re.search(r"instagram\.com/(?:[\w.]+/)?p/", url):
-        medias, caption = telecharger_galerie(url, code)
-    else:
-        video, caption = telecharger(url, code)
-        medias = [video]
-
-    videos = [m for m in medias if m.suffix in EXT_VIDEOS]
+def _construire_post(code: str, medias: list, caption: str) -> Post:
+    videos = [m for m in medias if m.suffix.lower() in EXT_VIDEOS]
     if len(medias) == 1 and videos:
         type_post = "reel"
     elif not videos:
@@ -291,6 +289,23 @@ def preparer(url: str) -> Post:
             "GeeLark ne sait publier que des carrousels de photos ou un réel vidéo."
         )
     tronque = len(medias) > MAX_CARROUSEL
-    medias = medias[:MAX_CARROUSEL]
-    return Post(code=code, dossier=WORKDIR / code, medias=medias, type=type_post,
-                caption_original=caption, caption_en=traduire(caption), tronque=tronque)
+    return Post(code=code, dossier=WORKDIR / code, medias=medias[:MAX_CARROUSEL], type=type_post,
+                caption_original=caption or "", tronque=tronque)
+
+
+def preparer(url: str) -> Post:
+    """Lien Instagram -> médias téléchargés (noms courts) + légende d'origine."""
+    # On retire « ?img_index=1 », « ?igsh=… » etc. : img_index ferait télécharger une seule photo du carrousel
+    url = url.split("#")[0].split("?")[0]
+    code = extraire_code(url)
+    if re.search(r"instagram\.com/(?:[\w.]+/)?p/", url):
+        medias, caption = telecharger_galerie(url, code)
+    else:
+        video, caption = telecharger(url, code)
+        medias = [video]
+    return _construire_post(code, medias, caption)
+
+
+def preparer_video(fichier: Path, code: str, caption: str) -> Post:
+    """Vidéo envoyée directement dans Telegram -> même traitement qu'un réel."""
+    return _construire_post(code, [fichier], caption)

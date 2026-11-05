@@ -13,5 +13,3 @@ services:
         sync: false
       - key: GEELARK_TOKEN
         sync: false
-      - key: GEELARK_PHONE_ID
-        value: "638208727043801351"
