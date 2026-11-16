@@ -104,21 +104,38 @@ def telecharger_galerie(url: str, code: str) -> tuple[list, str]:
     return medias, caption
 
 
+try:  # ffmpeg embarqué : permet de fusionner image HD + son (sinon Instagram ne donne que du 640-720 p)
+    import imageio_ffmpeg
+    FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
+except Exception:
+    FFMPEG = None
+
+
 def telecharger(url: str, code: str) -> tuple[Path, str]:
     dossier = WORKDIR / code
     dossier.mkdir(parents=True, exist_ok=True)
     opts = {
         "outtmpl": str(dossier / f"post_{code}.%(ext)s"),  # nom court
-        "format": "mp4/best",
         "quiet": True,
         "noplaylist": True,
+        # plus haute résolution possible, puis meilleur fps, en h264 de préférence (compatible Instagram)
+        "format_sort": ["res", "fps", "vcodec:h264"],
     }
+    if FFMPEG:
+        opts["format"] = "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b"
+        opts["merge_output_format"] = "mp4"
+        opts["ffmpeg_location"] = FFMPEG
+    else:  # sans ffmpeg : seulement les fichiers déjà complets
+        opts["format"] = "b[ext=mp4]/b"
     cookies = _cookies()
     if cookies:
         opts["cookiefile"] = cookies
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
         chemin = Path(ydl.prepare_filename(info))
+    if chemin.suffix.lower() != ".mp4" and chemin.with_suffix(".mp4").exists():
+        chemin = chemin.with_suffix(".mp4")
+    log.info("Réel %s : %sx%s, %s", code, info.get("width"), info.get("height"), info.get("format_id"))
     caption = info.get("description") or ""
     return chemin, caption
 

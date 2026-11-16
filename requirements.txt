@@ -3,3 +3,4 @@ yt-dlp
 deep-translator==1.11.4
 requests
 gallery-dl
+imageio-ffmpeg
