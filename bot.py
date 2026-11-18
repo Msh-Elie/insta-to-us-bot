@@ -69,6 +69,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def recevoir_lien(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not autorise(update):
         return
+    if await reprendre_traduction(update, context):
+        return
     m = LIEN_RE.search(update.message.text or "")
     if not m:
         await update.message.reply_text("Envoie-moi un lien instagram.com/reel/… ou /p/…, ou une vidéo.")
@@ -137,28 +139,72 @@ async def preparer_post(context: ContextTypes.DEFAULT_TYPE, travail: dict):
 async def traiter(query, context, travail: dict, nom: str, comptes: list):
     try:
         post = await preparer_post(context, travail)
-        langues = sorted({c["langue"] for c in comptes})
-        for langue in langues:  # on traduit avant de créer les tâches pour repérer un souci tout de suite
-            await asyncio.to_thread(post.legende, langue)
     except Exception as e:
         log.exception("échec préparation")
         await query.edit_message_text(f"❌ {nom} : échec de la préparation : {e}")
         return
+    langues = sorted({c["langue"] for c in comptes})
+    await demander_traductions(context, query.message.chat_id, nom, post, comptes, langues)
 
+
+async def demander_traductions(context, chat_id, nom, post, comptes, langues):
+    """Traduit chaque langue. Si la traduction automatique échoue, demande la légende traduite à la main."""
+    for langue in langues:
+        if langue in post.legendes:
+            continue
+        try:
+            await asyncio.to_thread(post.legende, langue)
+        except Exception as e:
+            log.warning("traduction %s indisponible : %s", langue, e)
+            context.user_data["traduction"] = {
+                "post": post, "nom": nom, "comptes": comptes, "langues": langues,
+                "langue": langue, "chat_id": chat_id,
+            }
+            cible = "anglais" if langue == "en" else "français"
+            await context.bot.send_message(
+                chat_id,
+                f"⚠️ Traduction automatique indisponible pour {nom} (services saturés).\n"
+                f"Envoie-moi la légende en {cible} et je la publie telle quelle, ou écris « annuler ».\n\n"
+                f"Légende d'origine :\n{post.caption_original or '(pas de légende)'}")
+            return
+    await publier(context, chat_id, nom, post, comptes, langues)
+
+
+async def reprendre_traduction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Si le bot attend une traduction à la main, prend le message comme traduction. Renvoie True si consommé."""
+    attente = context.user_data.get("traduction")
+    if not attente:
+        return False
+    texte = (update.message.text or "").strip()
+    context.user_data.pop("traduction", None)
+    if LIEN_RE.search(texte):  # un nouveau lien annule l'attente en cours
+        shutil.rmtree(attente["post"].dossier, ignore_errors=True)
+        return False
+    if texte.lower() in ("annuler", "annule"):
+        shutil.rmtree(attente["post"].dossier, ignore_errors=True)
+        await update.message.reply_text("Annulé.")
+        return True
+    attente["post"].legendes[attente["langue"]] = texte
+    await demander_traductions(context, attente["chat_id"], attente["nom"], attente["post"],
+                               attente["comptes"], attente["langues"])
+    return True
+
+
+async def publier(context, chat_id, nom: str, post, comptes: list, langues: list):
     nb = len(post.medias)
     quoi = "réel" if post.type == "reel" else f"carrousel ({nb} photo{'s' if nb > 1 else ''})"
     avert = "\n⚠️ Plus de 10 médias : seuls les 10 premiers sont publiés." if post.tronque else ""
     legendes_txt = "\n\n".join(
         f"{'🇺🇸 EN' if l == 'en' else '🇫🇷 FR'} :\n{post.legende(l) or '(pas de légende)'}" for l in langues)
-
+    statut = await context.bot.send_message(chat_id, f"⏳ {nom} : préparation de la publication…")
     try:
         if not geelark.est_configure():
-            await query.edit_message_text(f"✅ {nom} : matériaux prêts ({quoi}), GeeLark pas branché.{avert}")
-            await envoyer_medias(query.message, post)
-            await query.message.reply_text(legendes_txt)
+            await statut.edit_text(f"✅ {nom} : matériaux prêts ({quoi}), GeeLark pas branché.{avert}")
+            await envoyer_medias(statut, post)
+            await statut.reply_text(legendes_txt)
             return
 
-        await query.edit_message_text(f"📤 {nom} : envoi du {quoi} à GeeLark…")
+        await statut.edit_text(f"📤 {nom} : envoi du {quoi} à GeeLark…")
         urls = await asyncio.to_thread(geelark.envoyer_medias, post.medias)
 
         debut = int(time.time()) + geelark.DELAI_PUBLICATION
@@ -176,12 +222,12 @@ async def traiter(query, context, travail: dict, nom: str, comptes: list):
                 log.exception("échec tâche %s", compte["nom"])
                 lignes.append(f"{drapeau} {compte['nom']} : ❌ {e}")
 
-        await query.edit_message_text(
+        await statut.edit_text(
             f"{'✅' if ok == len(comptes) else '⚠️'} {nom} : {quoi}, {ok}/{len(comptes)} publication(s) programmée(s).{avert}\n\n"
             + "\n".join(lignes) + f"\n\n{legendes_txt}")
     except Exception as e:
         log.exception("échec publication")
-        await query.message.reply_text(f"❌ {nom} : erreur à la publication : {e}")
+        await context.bot.send_message(chat_id, f"❌ {nom} : erreur à la publication : {e}")
     finally:
         shutil.rmtree(post.dossier, ignore_errors=True)
 
